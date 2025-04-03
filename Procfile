@@ -1,1 +1,1 @@
-web: ./target/release/sazen-tea-checker
+worker: ./target/release/sazen-tea-checker
