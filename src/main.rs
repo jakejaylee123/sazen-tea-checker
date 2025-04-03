@@ -53,11 +53,9 @@ const ENV_VAR_SMTP_NOTIFICATION_SUBJECT: &str = "SMTP_NOTIFICATION_SUBJECT";
 
 const SAZEN_TEA_PRODUCTS_URL: &str = "https://www.sazentea.com/en/products";
 
-const MATCHA_BRANDS: [&str; 4] = [
+const MATCHA_BRANDS: [&str; 2] = [
     "marukyu koyamaen",
-    "horii shichimeien",
-    "kanbayashi shunsho",
-    "maruyasu"
+    "horii shichimeien"
 ];
 const MATCHA_VARIANTS: [&str; 5] = [
     "usucha",
