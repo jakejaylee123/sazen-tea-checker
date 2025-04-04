@@ -2,14 +2,15 @@ use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 
+use log::{info, error};
+
 use reqwest;
 
 use select::document::Document;
 use select::predicate::{Class, Name};
 
 use std::env;
-use std::fmt;
-use std::thread;
+use std::fmt::{self, Write};
 use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -66,43 +67,59 @@ const MATCHA_VARIANTS: [&str; 5] = [
 ];
 
 struct SazenTeaCheckerJob {
-    parameters: JobParameters
+    parameters: JobParameters,
+    client: reqwest::Client
 }
 
 impl SazenTeaCheckerJob {
-    pub const fn new(parameters: JobParameters) -> Self {
-        Self { parameters }
+    pub fn new(parameters: JobParameters) -> Self {
+        Self { 
+            parameters,
+            client: reqwest::Client::new()
+        }
     }
 
     async fn get_product_html_content(&self) -> Result<String, String> {
-        let result = reqwest::get(SAZEN_TEA_PRODUCTS_URL).await;
+        let result = self.client.get(SAZEN_TEA_PRODUCTS_URL).send().await;
         let Ok(response) = result else {
-            return Err(format!("GET request failed: {:?}", result.err().unwrap()))
+            return Err(format!("GET request failed: {:?}", result.err()
+                .ok_or_else(|| "Unknowm error")))
         };
     
         let text_result = response.text().await;
         let Ok(response_text) = text_result else {
-            return Err(format!("Conversion of response to text failed: {:?}", text_result.err()))
+            return Err(format!("Conversion of response to text failed: {:?}", text_result.err()
+                .ok_or_else(|| "Unknown error")))
         };
         
         Ok(response_text)
     }
     
-    fn get_product_list_from_html(&self, html: String) -> Vec<Product> {
+    fn get_product_list_from_html(&self, html: String) -> Result<Vec<Product>, String> {
         let document = Document::from(html.as_str() );
         let product_elements = document.find(Class("product"));
     
-        product_elements
-            .into_iter()
-            .map(|element| Product { 
-                name: element.find(Class("product-name")).nth(0).unwrap().text().clone(),
-                description: element.find(Name("p")).nth(0).unwrap().text().clone()
-            })
-            .collect()
+        let mut product_list: Vec<Product> = vec![];
+        for element in product_elements {
+            let Some(name_element) = element.find(Class("product-name")).nth(0) else {
+                continue;
+            };
+
+            let Some(description_element) = element.find(Name("p")).nth(0) else {
+                continue;
+            };
+
+            product_list.push(Product {
+                name: name_element.text().clone(),
+                description: description_element.text().clone()
+            });
+        }
+
+        Ok(product_list)
     }
     
-    fn get_matcha_product_list_from_html(&self, html: String) -> Vec<Product> {
-        self.get_product_list_from_html(html)
+    fn get_matcha_product_list_from_html(&self, html: String) -> Result<Vec<Product>, String> {
+        Ok(self.get_product_list_from_html(html)?
             .into_iter()
             .filter(|product| {
                 MATCHA_BRANDS.iter().any(|brand| {
@@ -116,29 +133,44 @@ impl SazenTeaCheckerJob {
                         || product.description.to_lowercase().contains(variant)
                 })
             })
-            .collect()
+            .collect())
     }
     
     fn send_product_listing_email(&self, products: &Vec<Product>) -> Result<String, String> {
-        let mut message_body_builder = String::new();
-        message_body_builder.push_str("<p>Check out these matcha products!</p>\n\n");
-    
-        message_body_builder.push_str("<ul>\n");
-        for product in products {
-            message_body_builder
-                .push_str(format!("<li><strong>{0}</strong>: {1}\n", product.name, product.description).as_str());
-        }
-        message_body_builder.push_str("</ul>\n\n");
-    
-        message_body_builder.push_str("<p>Have a great day!</p>");
-    
-        let email = Message::builder()
-            .from(self.parameters.smtp_transcipient.parse().unwrap())
-            .to(self.parameters.smtp_recipient.parse().unwrap())
+        let parsed_smtp_transcipient_result = self.parameters.smtp_transcipient.parse(); 
+        let Ok(parsed_smtp_transcipient) = parsed_smtp_transcipient_result else {
+            return Err(format!("Error parsing transcipient email: {:?}", 
+                parsed_smtp_transcipient_result.err().ok_or_else(|| "Unknowm error")))
+        };
+
+        let parsed_smtp_recipient_result = self.parameters.smtp_recipient.parse();
+        let Ok(parsed_smtp_recipient) = parsed_smtp_recipient_result else {
+            return Err(format!("Error parsing recipient email: {:?}", 
+                parsed_smtp_recipient_result.err().ok_or_else(|| "Unknowm error")))
+        };
+
+        let message = Message::builder()
+            .from(parsed_smtp_transcipient)
+            .to(parsed_smtp_recipient)
             .subject(self.parameters.smtp_notification_subject.clone())
-            .header(ContentType::TEXT_HTML)
-            .body(message_body_builder)
-            .unwrap();
+            .header(ContentType::TEXT_HTML);
+
+        let mut body = String::new();
+        write!(&mut body, "<p>Check out these matcha products!</p>\n\n").unwrap();
+    
+        write!(&mut body, "<ul>\n").unwrap();
+        for product in products {
+            write!(&mut body, "<li><strong>{}</strong>: {}\n", product.name, product.description).unwrap();
+        }
+        write!(&mut body, "</ul>\n\n").unwrap();
+    
+        write!(&mut body, "<p>Have a great day!</p>").unwrap();
+        
+        let message_with_body_result = message.body(body);
+        let Ok(message_with_body) = message_with_body_result else {
+            return Err(format!("Error generating e-mail message: {:?}", 
+                message_with_body_result.err().ok_or_else(|| "Unknown error")));
+        };
     
         let creds = Credentials::new(
             self.parameters.smtp_user.to_owned(), 
@@ -146,12 +178,12 @@ impl SazenTeaCheckerJob {
     
         // Open a remote connection to gmail
         let mailer = SmtpTransport::relay(&self.parameters.smtp_url)
-            .unwrap()
+            .expect("Unable to create mailer. Check SMTP URL...")
             .credentials(creds)
             .build();
     
         // Send the email
-        match mailer.send(&email) {
+        match mailer.send(&message_with_body) {
             Ok(_) => Ok(format!("Email sent successfully!")),
             Err(e) => Err(format!("Could not send email: {e:?}"))
         }
@@ -160,12 +192,13 @@ impl SazenTeaCheckerJob {
     async fn run_job_iteration(&self) -> Result<(), String> {
         let text_result = self.get_product_html_content().await?;
     
-        let products = self.get_matcha_product_list_from_html(text_result);
-        if products.iter().count() <= 0 {
-            println!("No matcha products found in this check iteration.");
+        let products = self.get_matcha_product_list_from_html(text_result)?;
+        if products.is_empty() {
+            info!("No matcha products found in this check iteration.");
             return Ok(())
         }
     
+        info!("Matcha products found... Sending e-mail...");
         self.send_product_listing_email(&products)?;
     
         Ok(())
@@ -175,11 +208,11 @@ impl SazenTeaCheckerJob {
         let interval_seconds = self.parameters.interval_minutes * 60;
     
         loop {
-            println!("Running job iteration...");
+            info!("Running job iteration...");
             self.run_job_iteration().await?;
 
-            println!("Sleeping for {:?} minutes...", self.parameters.interval_minutes);
-            thread::sleep(Duration::from_secs(interval_seconds));
+            info!("Sleeping for {:?} minutes...", self.parameters.interval_minutes);
+            tokio::time::sleep(Duration::from_secs(interval_seconds)).await;
         }
     }
 }
@@ -210,12 +243,12 @@ fn get_job_parameters() -> Result<JobParameters, JobParameterError> {
 async fn main() -> Result<(), String> {
     let parameters = get_job_parameters();
     match parameters {
-        Err(error) => Err(format!("Error getting parameters: {:?}", error)),
+        Err(error) => error!("Error getting parameters: {:?}", error),
         Ok(parameters) => {
             let job = SazenTeaCheckerJob::new(parameters);
             job.run_job_loop().await?;
-
-            Ok(())
         }
     }
+
+    Ok(())
 }
