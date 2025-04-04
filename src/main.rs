@@ -13,15 +13,15 @@ use std::time::Duration;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum JobParameterError {
-    NotPresent,
-    InvalidFormat
+    NotPresent(&'static str),
+    InvalidFormat(&'static str)
 }
 
 impl fmt::Display for JobParameterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            JobParameterError::NotPresent => write!(f, "Job parameter (environment variable) not found"),
-            JobParameterError::InvalidFormat => write!(f, "Job parameter was not in valid format")
+        match self {
+            JobParameterError::NotPresent(name) => write!(f, "Job parameter '{}' not found", name),
+            JobParameterError::InvalidFormat(name) => write!(f, "Job parameter '{}' is invalid format", name)
         }
     }
 }
@@ -209,7 +209,7 @@ impl SazenTeaCheckerJob {
             println!("Running job iteration...");
             self.run_job_iteration().await?;
 
-            println!("Sleeping for {:?} minutes...", self.parameters.interval_minutes);
+            println!("Sleeping for {} minutes...", self.parameters.interval_minutes);
             tokio::time::sleep(Duration::from_secs(interval_seconds)).await;
         }
     }
@@ -219,21 +219,21 @@ impl SazenTeaCheckerJob {
 fn get_job_parameters() -> Result<JobParameters, JobParameterError> {
     Ok(JobParameters { 
         interval_minutes: env::var(ENV_VAR_JOB_INTERVAL_MINUTES)
-            .map_err(|_| JobParameterError::NotPresent)
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_JOB_INTERVAL_MINUTES))
             .and_then(|value| value.parse::<u64>()
-                .map_err(|_| JobParameterError::InvalidFormat))?,
+                .map_err(|_| JobParameterError::InvalidFormat(ENV_VAR_JOB_INTERVAL_MINUTES)))?,
         smtp_url: env::var(ENV_VAR_SMTP_URL)
-            .map_err(|_| JobParameterError::NotPresent)?,
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_SMTP_URL))?,
         smtp_user: env::var(ENV_VAR_SMTP_USER)
-            .map_err(|_| JobParameterError::NotPresent)?,
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_SMTP_USER))?,
         smtp_password: env::var(ENV_VAR_SMTP_PASSWORD)
-            .map_err(|_| JobParameterError::NotPresent)?,
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_SMTP_PASSWORD))?,
         smtp_transcipient: env::var(ENV_VAR_SMTP_TRANSCIPIENT)
-            .map_err(|_| JobParameterError::NotPresent)?,
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_SMTP_TRANSCIPIENT))?,
         smtp_recipient: env::var(ENV_VAR_SMTP_RECIPIENT)
-            .map_err(|_| JobParameterError::NotPresent)?,
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_SMTP_RECIPIENT))?,
         smtp_notification_subject: env::var(ENV_VAR_SMTP_NOTIFICATION_SUBJECT)
-            .map_err(|_| JobParameterError::NotPresent)?,
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_SMTP_NOTIFICATION_SUBJECT))?,
     })
 }
 
@@ -241,7 +241,7 @@ fn get_job_parameters() -> Result<JobParameters, JobParameterError> {
 async fn main() -> Result<(), String> {
     let parameters = get_job_parameters();
     match parameters {
-        Err(error) => println!("Error getting parameters: {:?}", error),
+        Err(error) => println!("Error getting parameters: {}", error),
         Ok(parameters) => {
             let job = SazenTeaCheckerJob::new(parameters);
             job.run_job_loop().await?;
