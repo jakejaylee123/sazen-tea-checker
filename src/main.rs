@@ -2,8 +2,6 @@ use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 
-use log::{info, error};
-
 use reqwest;
 
 use select::document::Document;
@@ -194,11 +192,11 @@ impl SazenTeaCheckerJob {
     
         let products = self.get_matcha_product_list_from_html(text_result)?;
         if products.is_empty() {
-            info!("No matcha products found in this check iteration.");
+            println!("No matcha products found in this check iteration.");
             return Ok(())
         }
     
-        info!("Matcha products found... Sending e-mail...");
+        println!("Matcha products found... Sending e-mail...");
         self.send_product_listing_email(&products)?;
     
         Ok(())
@@ -208,10 +206,10 @@ impl SazenTeaCheckerJob {
         let interval_seconds = self.parameters.interval_minutes * 60;
     
         loop {
-            info!("Running job iteration...");
+            println!("Running job iteration...");
             self.run_job_iteration().await?;
 
-            info!("Sleeping for {:?} minutes...", self.parameters.interval_minutes);
+            println!("Sleeping for {:?} minutes...", self.parameters.interval_minutes);
             tokio::time::sleep(Duration::from_secs(interval_seconds)).await;
         }
     }
@@ -243,7 +241,7 @@ fn get_job_parameters() -> Result<JobParameters, JobParameterError> {
 async fn main() -> Result<(), String> {
     let parameters = get_job_parameters();
     match parameters {
-        Err(error) => error!("Error getting parameters: {:?}", error),
+        Err(error) => println!("Error getting parameters: {:?}", error),
         Ok(parameters) => {
             let job = SazenTeaCheckerJob::new(parameters);
             job.run_job_loop().await?;
