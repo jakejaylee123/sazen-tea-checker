@@ -29,6 +29,9 @@ impl fmt::Display for JobParameterError {
 struct JobParameters {
     interval_minutes: u64,
 
+    products_url: String,
+    matcha_brands: Vec<String>,
+
     smtp_url: String,
     smtp_user: String,
     smtp_password: String,
@@ -43,6 +46,8 @@ struct Product {
 }
 
 const ENV_VAR_JOB_INTERVAL_MINUTES: &str = "JOB_INTERVAL_MINUTES";
+const ENV_VAR_PRODUCTS_URL: &str = "PRODUCTS_URL";
+const ENV_VAR_MATCHA_BRANDS: &str = "MATCHA_BRANDS";
 const ENV_VAR_SMTP_URL: &str = "SMTP_URL";
 const ENV_VAR_SMTP_USER: &str = "SMTP_USER";
 const ENV_VAR_SMTP_PASSWORD: &str = "SMTP_PASSWORD";
@@ -50,12 +55,6 @@ const ENV_VAR_SMTP_TRANSCIPIENT: &str = "SMTP_TRANSCIPIENT";
 const ENV_VAR_SMTP_RECIPIENT: &str = "SMTP_RECIPIENT";
 const ENV_VAR_SMTP_NOTIFICATION_SUBJECT: &str = "SMTP_NOTIFICATION_SUBJECT";
 
-const SAZEN_TEA_PRODUCTS_URL: &str = "https://www.sazentea.com/en/products";
-
-const MATCHA_BRANDS: [&str; 2] = [
-    "marukyu koyamaen",
-    "horii shichimeien"
-];
 const MATCHA_VARIANTS: [&str; 5] = [
     "usucha",
     "koicha",
@@ -78,7 +77,7 @@ impl SazenTeaCheckerJob {
     }
 
     async fn get_product_html_content(&self) -> Result<String, String> {
-        let result = self.client.get(SAZEN_TEA_PRODUCTS_URL).send().await;
+        let result = self.client.get(&self.parameters.products_url).send().await;
         let Ok(response) = result else {
             return Err(format!("GET request failed: {:?}", result.err()
                 .ok_or_else(|| "Unknowm error")))
@@ -120,7 +119,7 @@ impl SazenTeaCheckerJob {
         Ok(self.get_product_list_from_html(html)?
             .into_iter()
             .filter(|product| {
-                MATCHA_BRANDS.iter().any(|brand| {
+                self.parameters.matcha_brands.iter().any(|brand| {
                     product.name.to_lowercase().contains(brand)
                         || product.description.to_lowercase().contains(brand)
                 })
@@ -215,13 +214,17 @@ impl SazenTeaCheckerJob {
     }
 }
 
-
 fn get_job_parameters() -> Result<JobParameters, JobParameterError> {
     Ok(JobParameters { 
         interval_minutes: env::var(ENV_VAR_JOB_INTERVAL_MINUTES)
             .map_err(|_| JobParameterError::NotPresent(ENV_VAR_JOB_INTERVAL_MINUTES))
             .and_then(|value| value.parse::<u64>()
                 .map_err(|_| JobParameterError::InvalidFormat(ENV_VAR_JOB_INTERVAL_MINUTES)))?,
+        products_url: env::var(ENV_VAR_PRODUCTS_URL)
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_PRODUCTS_URL))?,
+        matcha_brands: env::var(ENV_VAR_MATCHA_BRANDS)
+            .map_err(|_| JobParameterError::NotPresent(ENV_VAR_MATCHA_BRANDS))
+            .map(|value| value.split(',').map(String::from).collect::<Vec<_>>())?,
         smtp_url: env::var(ENV_VAR_SMTP_URL)
             .map_err(|_| JobParameterError::NotPresent(ENV_VAR_SMTP_URL))?,
         smtp_user: env::var(ENV_VAR_SMTP_USER)
