@@ -96,8 +96,8 @@ impl SazenTeaCheckerJob {
         self.get_html_content(&self.parameters.products_url).await
     }
     
-    async fn get_product_list_from_html(&self, html: String) -> Result<Vec<Product>, String> {
-        let products_document = Document::from(html.as_str());
+    async fn get_product_list_from_html(&self, html: &str) -> Result<Vec<Product>, String> {
+        let products_document = Document::from(html);
         let product_elements = products_document.find(Class("product"));
 
         let product_url_result = Url::parse(&self.parameters.products_url);
@@ -172,7 +172,7 @@ impl SazenTeaCheckerJob {
         Ok(products)
     }
     
-    async fn get_matcha_product_list_from_html(&self, html: String) -> Result<Vec<Product>, String> {
+    async fn get_matcha_product_list_from_html(&self, html: &String) -> Result<Vec<Product>, String> {
         let product_list = self.get_product_list_from_html(html).await?;
         let matcha_product_list = product_list
             .into_iter()
@@ -250,7 +250,7 @@ impl SazenTeaCheckerJob {
     async fn run_job_iteration(&self) -> Result<(), String> {
         let text_result = self.get_product_html_content().await?;
     
-        let products = self.get_matcha_product_list_from_html(text_result).await?;
+        let products = self.get_matcha_product_list_from_html(&text_result).await?;
         if products.is_empty() {
             println!("No matcha products found in this check iteration.");
             return Ok(())
