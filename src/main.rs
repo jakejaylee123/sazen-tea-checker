@@ -2,14 +2,17 @@ use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
 
-use reqwest;
+use reqwest::{self, Url};
 
 use select::document::Document;
-use select::predicate::{Class, Name};
+use select::predicate::{Attr, Class, Name, Predicate};
 
+use std::collections::HashMap;
 use std::env;
 use std::fmt::{self, Write};
 use std::time::Duration;
+
+use url::Origin::Tuple;
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum JobParameterError {
@@ -41,8 +44,11 @@ struct JobParameters {
 }
 
 struct Product {
+    url: String,
+    code: String,
     name: String,
-    description: String
+    maker: String,
+    ingredients: String
 }
 
 const ENV_VAR_JOB_INTERVAL_MINUTES: &str = "JOB_INTERVAL_MINUTES";
@@ -55,13 +61,7 @@ const ENV_VAR_SMTP_TRANSCIPIENT: &str = "SMTP_TRANSCIPIENT";
 const ENV_VAR_SMTP_RECIPIENT: &str = "SMTP_RECIPIENT";
 const ENV_VAR_SMTP_NOTIFICATION_SUBJECT: &str = "SMTP_NOTIFICATION_SUBJECT";
 
-const MATCHA_VARIANTS: [&str; 5] = [
-    "usucha",
-    "koicha",
-    "shiro",
-    "mukashi",
-    "matcha"
-];
+const MATCHA_INGREDIENTS: [&str; 2] = ["matcha", "green tea powder"];
 
 struct SazenTeaCheckerJob {
     parameters: JobParameters,
@@ -76,8 +76,8 @@ impl SazenTeaCheckerJob {
         }
     }
 
-    async fn get_product_html_content(&self) -> Result<String, String> {
-        let result = self.client.get(&self.parameters.products_url).send().await;
+    async fn get_html_content(&self, url: &str) -> Result<String, String> {
+        let result = self.client.get(url).send().await;
         let Ok(response) = result else {
             return Err(format!("GET request failed: {:?}", result.err()
                 .ok_or_else(|| "Unknowm error")))
@@ -91,46 +91,104 @@ impl SazenTeaCheckerJob {
         
         Ok(response_text)
     }
-    
-    fn get_product_list_from_html(&self, html: String) -> Result<Vec<Product>, String> {
-        let document = Document::from(html.as_str() );
-        let product_elements = document.find(Class("product"));
-    
-        let mut product_list: Vec<Product> = vec![];
-        for element in product_elements {
-            let Some(name_element) = element.find(Class("product-name")).nth(0) else {
-                continue;
-            };
 
-            let Some(description_element) = element.find(Name("p")).nth(0) else {
-                continue;
-            };
-
-            product_list.push(Product {
-                name: name_element.text().clone(),
-                description: description_element.text().clone()
-            });
-        }
-
-        Ok(product_list)
+    async fn get_product_html_content(&self) -> Result<String, String> {
+        self.get_html_content(&self.parameters.products_url).await
     }
     
-    fn get_matcha_product_list_from_html(&self, html: String) -> Result<Vec<Product>, String> {
-        Ok(self.get_product_list_from_html(html)?
+    async fn get_product_list_from_html(&self, html: String) -> Result<Vec<Product>, String> {
+        let products_document = Document::from(html.as_str());
+        let product_elements = products_document.find(Class("product"));
+
+        let product_url_result = Url::parse(&self.parameters.products_url);
+        let Ok(product_url) = product_url_result else {
+            return Err(format!("Error parsing product URL: {:?}", 
+                product_url_result.err().ok_or_else(|| "Unknown error")))
+        };
+
+        let Tuple(scheme, product_base_url_parts, _) = product_url.origin() else {
+            return Err(format!("The configured URL '{}' was not in the expected format", 
+                self.parameters.products_url));
+        };
+        let product_base_url = format!("{}://{}", scheme, product_base_url_parts);
+        
+        let product_links: Vec<String> = product_elements
+            .filter_map(|element| {
+                let Some(link_element) = element
+                    .find(Name("a")).nth(0) else { return None; };
+                let Some(value) = link_element
+                    .attr("href") else { return None; };
+
+                let value = format!("{}{}", product_base_url, value);
+                Some(value)
+            })
+            .collect();
+
+        let mut products: Vec<Product> = vec![];
+        for link in product_links {
+            let product_detail_text_result = self.get_html_content(&link).await;
+            let Ok(product_detail_text) = product_detail_text_result else {
+                println!("Error retrieving product details: {:?}", 
+                    product_detail_text_result.err().ok_or_else(|| "Unknown error"));
+                continue;
+            };
+
+            let product_detail_document = Document::from(product_detail_text.as_str());
+
+            let Some(product_name) = product_detail_document
+                .find(Name("h1")
+                .and(Attr("itemprop", "name"))).nth(0) else { continue; };
+            let Some(product_info) = product_detail_document
+                .find(Attr("id", "product-info")).nth(0) else { continue; };
+
+            let mut product_info_hash: HashMap<String, String> = HashMap::new();
+            let product_info_pairs: Vec<Vec<String>> = product_info.find(Name("p"))
+                .map(|element| element.text().split(":")
+                    .map(|part| part.trim().to_string()).collect())
+                .collect();
+            for (index, pair) in product_info_pairs.iter().enumerate() {
+                product_info_hash.insert(
+                    pair.iter().nth(0).unwrap_or(&format!("BAD_KEY_{}", index)).clone(), 
+                    pair.iter().nth(1).unwrap_or(&format!("BAD_VALLUE_{}", index)).clone());
+            }
+
+            let product = Product {
+                url: link,
+                code: product_info_hash.get("Item code")
+                    .unwrap_or(&"BAD_CODE".to_string()).clone(),
+                name: product_name.text().clone(),
+                maker: product_info_hash.get("Maker")
+                    .unwrap_or(&"BAD_MAKER".to_string()).clone(),
+                ingredients: product_info_hash.get("Ingredients")
+                    .unwrap_or(&"BAD_INGREDIENTS".to_string()).clone()
+            };
+
+            println!("Found product '{}':\r\n - Item code: {}\r\n - Maker: {}\r\n - Ingredients: {}\r\n - URL: {}", 
+                product.name, product.code, product.maker, product.ingredients, product.url);
+
+            products.push(product);
+        }
+        
+        Ok(products)
+    }
+    
+    async fn get_matcha_product_list_from_html(&self, html: String) -> Result<Vec<Product>, String> {
+        let product_list = self.get_product_list_from_html(html).await?;
+        let matcha_product_list = product_list
             .into_iter()
             .filter(|product| {
                 self.parameters.matcha_brands.iter().any(|brand| {
                     product.name.to_lowercase().contains(brand)
-                        || product.description.to_lowercase().contains(brand)
+                        || product.maker.to_lowercase().contains(brand)
                 })
             })
             .filter(|product| {
-                MATCHA_VARIANTS.iter().any(|variant| {
-                    product.name.to_lowercase().contains(variant)
-                        || product.description.to_lowercase().contains(variant)
-                })
+                MATCHA_INGREDIENTS.iter().any(|ingredient| 
+                    product.ingredients.to_lowercase().contains(ingredient))
             })
-            .collect())
+            .collect();
+        
+        Ok(matcha_product_list)
     }
     
     fn send_product_listing_email(&self, products: &Vec<Product>) -> Result<String, String> {
@@ -157,7 +215,10 @@ impl SazenTeaCheckerJob {
     
         write!(&mut body, "<ul>\n").unwrap();
         for product in products {
-            write!(&mut body, "<li><strong>{}</strong>: {}\n", product.name, product.description).unwrap();
+            write!(&mut body, "<li><strong>{} (Item code '{}')</strong>: {}\n",
+                product.name, product.code, product.maker).unwrap();
+            write!(&mut body, "<ul><li><a href=\"{}\">{}</a></li></ul>\n",
+                product.url, product.url).unwrap();
         }
         write!(&mut body, "</ul>\n\n").unwrap();
     
@@ -189,7 +250,7 @@ impl SazenTeaCheckerJob {
     async fn run_job_iteration(&self) -> Result<(), String> {
         let text_result = self.get_product_html_content().await?;
     
-        let products = self.get_matcha_product_list_from_html(text_result)?;
+        let products = self.get_matcha_product_list_from_html(text_result).await?;
         if products.is_empty() {
             println!("No matcha products found in this check iteration.");
             return Ok(())
