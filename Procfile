@@ -1,1 +1,1 @@
-worker: ./target/release/sazen-tea-checker
+worker: bin/sazen-tea-checker
