@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/mail"
 	"net/smtp"
@@ -78,9 +79,18 @@ const (
 
 var matchaIngredients = []string{"matcha", "green tea powder"}
 
+// missingProductCode is the placeholder used when a product page does not list
+// an item code.
+const missingProductCode = "BAD_CODE"
+
 type SazenTeaCheckerJob struct {
 	parameters JobParameters
 	client     *http.Client
+
+	// notifiedKeys is the set of product keys covered by the most recent
+	// notification email. It is only held in memory, so a restart of the job
+	// re-notifies on the next iteration that finds any products.
+	notifiedKeys map[string]struct{}
 }
 
 func NewSazenTeaCheckerJob(parameters JobParameters) *SazenTeaCheckerJob {
@@ -172,7 +182,7 @@ func (j *SazenTeaCheckerJob) getProductListFromHTML(html string) ([]Product, err
 
 		product := Product{
 			URL:         link,
-			Code:        getOrDefault(productInfoHash, "Item code", "BAD_CODE"),
+			Code:        getOrDefault(productInfoHash, "Item code", missingProductCode),
 			Name:        strings.TrimSpace(productName.Text()),
 			Maker:       getOrDefault(productInfoHash, "Maker", "BAD_MAKER"),
 			Ingredients: getOrDefault(productInfoHash, "Ingredients", "BAD_INGREDIENTS"),
@@ -185,6 +195,24 @@ func (j *SazenTeaCheckerJob) getProductListFromHTML(html string) ([]Product, err
 	}
 
 	return products, nil
+}
+
+// productKey identifies a product for change detection. The item code is the
+// intended identity; the URL stands in when a listing omits a code, so that two
+// code-less products do not collapse into a single entry.
+func productKey(product Product) string {
+	if product.Code == missingProductCode {
+		return product.URL
+	}
+	return product.Code
+}
+
+func productKeySet(products []Product) map[string]struct{} {
+	keys := make(map[string]struct{}, len(products))
+	for _, product := range products {
+		keys[productKey(product)] = struct{}{}
+	}
+	return keys
 }
 
 func (j *SazenTeaCheckerJob) getMatchaProductListFromHTML(html string) ([]Product, error) {
@@ -214,7 +242,7 @@ func (j *SazenTeaCheckerJob) getMatchaProductListFromHTML(html string) ([]Produc
 	return matchaProductList, nil
 }
 
-func (j *SazenTeaCheckerJob) sendProductListingEmail(products []Product) (string, error) {
+func (j *SazenTeaCheckerJob) sendProductListingEmail(products []Product, newKeys map[string]struct{}) (string, error) {
 	from, err := mail.ParseAddress(j.parameters.SMTPTranscipient)
 	if err != nil {
 		return "", fmt.Errorf("Error parsing transcipient email: %w", err)
@@ -228,8 +256,12 @@ func (j *SazenTeaCheckerJob) sendProductListingEmail(products []Product) (string
 	fmt.Fprintf(&body, "<p>Check out these matcha products!</p>\n\n")
 	fmt.Fprintf(&body, "<ul>\n")
 	for _, product := range products {
-		fmt.Fprintf(&body, "<li><strong>%s (Item code '%s')</strong>: %s\n",
-			product.Name, product.Code, product.Maker)
+		marker := ""
+		if _, isNew := newKeys[productKey(product)]; isNew {
+			marker = " <em>(NEW!)</em>"
+		}
+		fmt.Fprintf(&body, "<li><strong>%s (Item code '%s')</strong>: %s%s\n",
+			product.Name, product.Code, product.Maker, marker)
 		fmt.Fprintf(&body, "<ul><li><a href=\"%s\">%s</a></li></ul>\n",
 			product.URL, product.URL)
 	}
@@ -277,13 +309,31 @@ func (j *SazenTeaCheckerJob) runJobIteration() error {
 	}
 	if len(products) == 0 {
 		fmt.Println("No matcha products found in this check iteration.")
+		// There is nothing worth checking out, so no email goes out. Forget what
+		// was last notified so that a product returning later counts as a change.
+		j.notifiedKeys = nil
 		return nil
 	}
 
-	fmt.Println("Matcha products found... Sending e-mail...")
-	if _, err := j.sendProductListingEmail(products); err != nil {
+	currentKeys := productKeySet(products)
+	if maps.Equal(currentKeys, j.notifiedKeys) {
+		fmt.Printf("Found %d matcha product(s), unchanged since the last notification. No e-mail sent.\n", len(products))
+		return nil
+	}
+
+	newKeys := make(map[string]struct{})
+	for key := range currentKeys {
+		if _, alreadyNotified := j.notifiedKeys[key]; !alreadyNotified {
+			newKeys[key] = struct{}{}
+		}
+	}
+
+	fmt.Printf("Matcha product listing changed (%d product(s), %d new)... Sending e-mail...\n",
+		len(currentKeys), len(newKeys))
+	if _, err := j.sendProductListingEmail(products, newKeys); err != nil {
 		return err
 	}
+	j.notifiedKeys = currentKeys
 
 	return nil
 }
